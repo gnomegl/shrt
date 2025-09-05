@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+
+# @describe Gray Hat Warfare API client for searching exposed files
+# @arg keywords "Your search query" [string]
+# @arg page "Page number (1-based)" [int] @default "1"
+# @arg size "Number of results per page (1-1000)" [int] @default "100"
+# @option -e --ext "File extensions to search for (comma-separated)" [string]
+# @option -o --order "Sort by property (size, timestamp)" [string] @choices "size" "timestamp"
+# @option -d --direction "Sort direction (asc, desc)" [string] @choices "asc" "desc"
+# @option -t --token "API Bearer token (can also use GRAYHAT_API_KEY env var)" [string]
+# @flag   -r --regexp "Treat keywords as regular expression"
+# @flag   -n --noautocorrect "Do not attempt to autocorrect regex queries"
+# @flag   -j --json "Output raw JSON instead of formatted results"
+# @flag   -q --quiet "Suppress colored output"
+# @flag   -u --urls-only "Output only URLs (one per line)"
+# @meta require-tools curl,jq
+
+eval "$(argc --argc-eval "$0" "$@")"
+
+setup_colors() {
+  if [ "$argc_quiet" = 1 ] || [ -z "$TERM" ] || [ "$TERM" = "dumb" ]; then
+    bold="" reset="" blue="" green="" yellow="" cyan="" magenta="" red=""
+  else
+    bold=$(tput bold) reset=$(tput sgr0) blue=$(tput setaf 4) green=$(tput setaf 2)
+    yellow=$(tput setaf 3) cyan=$(tput setaf 6) magenta=$(tput setaf 5) red=$(tput setaf 1)
+  fi
+}
+setup_colors
+
+get_api_token() {
+  if [ -n "$argc_token" ]; then
+    echo "$argc_token"
+  elif [ -n "$GRAYHAT_API_KEY" ]; then
+    echo "$GRAYHAT_API_KEY"
+  elif [ -f "$HOME/.config/grayhatwarfare/api_token" ]; then
+    cat "$HOME/.config/grayhatwarfare/api_token"
+  else
+    echo "${red}Error:${reset} No Gray Hat Warfare API token found." >&2
+    echo "Either:" >&2
+    echo "  1. Pass it with --token" >&2
+    echo "  2. Set GRAYHAT_API_KEY environment variable" >&2
+    echo "  3. Save it to ~/.config/grayhatwarfare/api_token" >&2
+    exit 1
+  fi
+}
+API_KEY=$(get_api_token)
+API_BASE="https://shorteners.grayhatwarfare.com/api/v1"
+
+print_kv() {
+  printf "${bold}%s:${reset} %s\n" "$1" "$2"
+}
+
+print_section() {
+  printf "\n${bold}%s:${reset}\n" "$1"
+}
+
+format_size() {
+  local bytes=$1
+  if [ "$bytes" -lt 1024 ]; then
+    echo "${bytes}B"
+  elif [ "$bytes" -lt 1048576 ]; then
+    echo "$(((bytes + 512) / 1024))KB"
+  elif [ "$bytes" -lt 1073741824 ]; then
+    echo "$(((bytes + 524288) / 1048576))MB"
+  else
+    echo "$(((bytes + 536870912) / 1073741824))GB"
+  fi
+}
+
+format_timestamp() {
+  local timestamp=$1
+  date -d "@${timestamp}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || date -r "${timestamp}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "N/A"
+}
+
+make_request() {
+  local endpoint="$1"
+  local params="$2"
+  local url="${API_BASE}/${endpoint}?${params}"
+  local response=$(curl -s -H "Authorization: Bearer ${API_KEY}" "$url")
+
+  if echo "$response" | jq -e '.error' >/dev/null 2>&1; then
+    error_msg=$(echo "$response" | jq -r '.error')
+    printf "${red}Error:${reset} API returned: ${red}%s${reset}\n" "$error_msg" >&2
+    exit 1
+  fi
+
+  if ! echo "$response" | jq empty >/dev/null 2>&1; then
+    printf "${red}Error:${reset} Invalid JSON response from API\n" >&2
+    exit 1
+  fi
+
+  echo "$response"
+}
+
+build_search_params() {
+  local params=""
+
+  local start=$(((argc_page - 1) * argc_size))
+  params="start=${start}&limit=${argc_size}"
+
+  params="${params}&keywords=$(printf '%s' "$argc_keywords" | jq -sRr @uri)"
+
+  [ -n "$argc_ext" ] && params="${params}&ext=${argc_ext}"
+  [ -n "$argc_order" ] && params="${params}&order=${argc_order}"
+  [ -n "$argc_direction" ] && params="${params}&direction=${argc_direction}"
+  [ "$argc_regexp" = 1 ] && params="${params}&regexp=1"
+  [ "$argc_noautocorrect" = 1 ] && params="${params}&noautocorrect=1"
+
+  echo "$params"
+}
+
+show_help() {
+  echo "${bold}Gray Hat Warfare API Client${reset}"
+  echo ""
+  echo "${bold}Description:${reset}"
+  echo "  Search and fetch exposed files from Gray Hat Warfare's database"
+  echo ""
+  echo "${bold}Usage:${reset}"
+  echo "  ${green}$(basename "$0") KEYWORDS [PAGE] [SIZE] [OPTIONS]${reset}"
+  echo ""
+  echo "${bold}Examples:${reset}"
+  echo "  ${green}$(basename "$0") \"password\"${reset}"
+  echo "  ${green}$(basename "$0") \"doe\" 1 100 --ext \"pdf\"${reset}"
+  echo "  ${green}$(basename "$0") \"config\" 2 50 --ext \"json,xml\" --order size --direction desc${reset}"
+  echo "  ${green}$(basename "$0") \".*\\.env$\" 1 10 --regexp${reset}"
+  echo "  ${green}$(basename "$0") \"api\" 1 100 --urls-only > found_urls.txt${reset}"
+  echo ""
+  echo "${bold}Search Options:${reset}"
+  echo "  ${yellow}-e, --ext${reset}           File extensions (comma-separated)"
+  echo "  ${yellow}-o, --order${reset}         Sort by: size, timestamp"
+  echo "  ${yellow}-d, --direction${reset}     Sort direction: asc, desc"
+  echo "  ${yellow}-r, --regexp${reset}        Treat keywords as regular expression"
+  echo "  ${yellow}-n, --noautocorrect${reset} Don't autocorrect regex queries"
+  echo ""
+  echo "${bold}Output Options:${reset}"
+  echo "  ${yellow}-j, --json${reset}          Output raw JSON"
+  echo "  ${yellow}-u, --urls-only${reset}     Output only URLs (one per line)"
+  echo "  ${yellow}-q, --quiet${reset}         Suppress colored output"
+  echo ""
+  echo "${bold}Authentication:${reset}"
+  echo "  ${yellow}-t, --token${reset}         API Bearer token"
+  echo ""
+  echo "${bold}Note:${reset} You can also set the GRAYHAT_API_KEY environment variable"
+  echo "      or save your token to ~/.config/grayhatwarfare/api_token"
+}
+
+format_search_results() {
+  local response="$1"
+  local urls_count=$(echo "$response" | jq -r '.urlsCount')
+  local premium_count=$(echo "$response" | jq -r '.premiumUrlsCount // "N/A"')
+  local start=$(echo "$response" | jq -r '.start')
+  local limit=$(echo "$response" | jq -r '.limit')
+  local actual_count=$(echo "$response" | jq -r '.urls | length')
+  local end_index=$((start + actual_count - 1))
+
+  if [ "$argc_urls_only" = 1 ]; then
+    echo "$response" | jq -r '.urls[].url'
+    return
+  fi
+
+  printf "${bold}Search Results${reset}\n"
+  printf "${bold}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${reset}\n\n"
+
+  print_kv "Total Matches" "${green}${urls_count}${reset}"
+  [ "$premium_count" != "N/A" ] && print_kv "Premium Matches" "${yellow}${premium_count}${reset}"
+  printf "${bold}Page:${reset} ${cyan}%s${reset} (${yellow}%s${reset}-${yellow}%s${reset} of ${yellow}%s${reset})\n" "$argc_page" "$((start + 1))" "$((end_index + 1))" "$urls_count"
+
+  if [ "$actual_count" -eq 0 ]; then
+    printf "\n${yellow}No results found.${reset}\n"
+    return
+  fi
+
+  print_section "Files Found"
+  echo "$response" | jq -r '.urls[] | "\(.url)|\(.size)|\(.ext // "N/A")|\(.mimeType // "N/A")|\(.shortUrl // "N/A")|\(.discoveredTimestamp)|\(.subDomain)|\(.regDomain)"' |
+    while IFS="|" read -r url size ext mime_type short_url timestamp subdomain reg_domain; do
+      size_formatted=$(format_size "$size")
+      timestamp_formatted=$(format_timestamp "$timestamp")
+
+      printf "${bold}• ${green}%s${reset}\n" "$url"
+      printf "  ${cyan}Domain:${reset} ${blue}%s${reset}" "$reg_domain"
+      [ "$subdomain" != "$reg_domain" ] && printf " (${magenta}%s${reset})" "$subdomain"
+      printf "\n"
+      printf "  ${cyan}Size:${reset} ${yellow}%s${reset}" "$size_formatted"
+      [ "$ext" != "N/A" ] && printf " ${cyan}Extension:${reset} ${yellow}%s${reset}" "$ext"
+      printf "\n"
+      [ "$mime_type" != "N/A" ] && printf "  ${cyan}MIME Type:${reset} ${magenta}%s${reset}\n" "$mime_type"
+      printf "  ${cyan}Discovered:${reset} ${yellow}%s${reset}\n" "$timestamp_formatted"
+      [ "$short_url" != "N/A" ] && printf "  ${cyan}Short URL:${reset} ${blue}%s${reset}\n" "$short_url"
+      printf "\n"
+    done
+}
+
+argc_page=${argc_page:-1}
+argc_size=${argc_size:-100}
+
+if [ -z "$argc_keywords" ]; then
+  echo "${red}Error:${reset} Keywords are required" >&2
+  show_help
+  exit 1
+fi
+
+if [ "$argc_size" -lt 1 ] || [ "$argc_size" -gt 1000 ]; then
+  echo "${red}Error:${reset} Size must be between 1 and 1000." >&2
+  exit 1
+fi
+
+if [ "$argc_page" -lt 1 ]; then
+  echo "${red}Error:${reset} Page must be 1 or greater." >&2
+  exit 1
+fi
+
+params=$(build_search_params)
+start_index=$(((argc_page - 1) * argc_size))
+response=$(make_request "files/${start_index}/${argc_size}" "$params")
+
+if [ "$argc_json" = 1 ]; then
+  echo "$response" | jq
+else
+  format_search_results "$response"
+fi
