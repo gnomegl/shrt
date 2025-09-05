@@ -81,15 +81,16 @@ make_request() {
   if echo "$response" | jq -e '.error' >/dev/null 2>&1; then
     error_msg=$(echo "$response" | jq -r '.error')
     printf "${red}Error:${reset} API returned: ${red}%s${reset}\n" "$error_msg" >&2
-    exit 1
+    return 1
   fi
 
   if ! echo "$response" | jq empty >/dev/null 2>&1; then
     printf "${red}Error:${reset} Invalid JSON response from API\n" >&2
-    exit 1
+    return 1
   fi
 
   echo "$response"
+  return 0
 }
 
 build_search_params() {
@@ -212,6 +213,15 @@ fi
 params=$(build_search_params)
 start_index=$(((argc_page - 1) * argc_size))
 response=$(make_request "files/${start_index}/${argc_size}" "$params")
+
+if [ $? -ne 0 ]; then
+  if [ "$argc_json" = 1 ]; then
+    echo '{"error": "Failed to retrieve data", "urls": [], "urlsCount": 0}' | jq
+  else
+    printf "${yellow}No results found or page does not exist.${reset}\n"
+  fi
+  exit 0
+fi
 
 if [ "$argc_json" = 1 ]; then
   echo "$response" | jq
